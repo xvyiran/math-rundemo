@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>聪明格 · 宇宙跑酷</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#08061a;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:system-ui,sans-serif;}
+#gw{width:100%;max-width:680px;padding:0 12px;}
+canvas{width:100%;height:auto;display:block;border-radius:12px;cursor:pointer;}
+#ui{margin-top:10px;display:flex;justify-content:space-between;padding:0 2px;}
+#sd{font-size:14px;color:#888;}
+#sd span{font-weight:500;color:#c4b5fd;}
+#ht{font-size:13px;color:#555;}
+</style>
+</head>
+<body>
+<div id="gw">
+  <canvas id="c" width="680" height="260"></canvas>
+  <div id="ui">
+    <div id="sd">得分 <span id="sc">0</span> &nbsp; 最高 <span id="hi">0</span></div>
+    <div id="ht">点击跳跃 · 答对才能跨越障碍</div>
+  </div>
+</div>
+<script>
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+const W=680,H=260,GROUND=H-48,PX=90,FPS=60;
+const FONT='system-ui,sans-serif';
+
+let state='start',score=0,hiScore=0,frame=0,spd=3.2;
+let player={y:GROUND,vy:0,jumps:0,dead:false};
+let obstacles=[],particles=[],btnAreas=[];
+let nextObsDist=420;
+let quiz=null;
+let quizResult=null,quizResultTimer=0;
+
+const stars=Array.from({length:50},()=>({
+  x:Math.random()*W,y:Math.random()*(GROUND-60),
+  r:Math.random()*1.5+0.3,spd:Math.random()*0.3+0.1
+}));
+
+function genMath(diff){
+  let a,b,op,ans;
+  const r=Math.random();
+  if(diff<3){
+    a=~~(Math.random()*9)+1;b=~~(Math.random()*9)+1;
+    op=r<0.5?'+':'-';
+    if(op==='-'&&a<b)[a,b]=[b,a];
+    ans=op==='+'?a+b:a-b;
+  }else if(diff<6){
+    a=~~(Math.random()*9)+2;b=~~(Math.random()*9)+2;
+    op=r<0.4?'+':r<0.7?'-':'×';
+    if(op==='-'&&a<b)[a,b]=[b,a];
+    ans=op==='+'?a+b:op==='-'?a-b:a*b;
+  }else{
+    a=~~(Math.random()*12)+2;b=~~(Math.random()*5)+2;
+    op=r<0.5?'×':'÷';
+    if(op==='÷'){ans=b;b=a*b;[a,b]=[b,a];}else ans=a*b;
+  }
+  let wrong=ans+(Math.random()<0.5?1:-1)*(~~(Math.random()*5)+1);
+  if(wrong<0)wrong=ans+~~(Math.random()*4)+1;
+  if(wrong===ans)wrong=ans+2;
+  const opts=Math.random()<0.5?[ans,wrong]:[wrong,ans];
+  return{q:`${a} ${op} ${b} = ?`,ans,opts,correctIdx:opts.indexOf(ans)};
+}
+
+let quizCount=0; // 全局题目计数
+
+function nextQuiz(){
+  quizCount++;
+  // 前3题固定最简单；3题后按得分爬升难度
+  const diff=quizCount<=3?0:Math.min(9,~~((score-12)/10));
+  quiz={math:genMath(diff),obs:null,phase:'question',optionTimer:0,optionTotal:0};
+  // 如果屏幕上已有未绑定的障碍（第2个以后的情况），立刻绑定最近的那个
+  const unlinked=obstacles.filter(o=>!o.linked&&o.x>PX+22);
+  if(unlinked.length>0){
+    // 取 x 最小（最近玩家）的那个
+    const nearest=unlinked.reduce((a,b)=>a.x<b.x?a:b);
+    nearest.linked=true;
+    quiz.obs=nearest;
+    if(nearest.x<=W-1){
+      // 障碍已在屏幕内，直接进入 options 阶段
+      const framesLeft=Math.max(20,(nearest.x-(PX+22))/spd);
+      quiz.optionTotal=framesLeft;
+      quiz.optionTimer=framesLeft;
+      quiz.phase='options';
+    }
+  }
+}
+
+function spawnObs(){
+  const h=30+~~(Math.random()*20),w=24+~~(Math.random()*14);
+  const ob={x:W+10,w,h,passable:false,ghostTimer:0,linked:false};
+  obstacles.push(ob);
+  return ob;
+}
+
+function jump(){
+  if(state==='dead'){resetGame();return;}
+  if(state==='start'){state='play';nextQuiz();return;}
+  if(state==='play'&&player.jumps<2&&!(quiz&&quiz.phase==='options')){
+    player.vy=player.jumps===0?-9.5:-7.8;
+    player.jumps++;
+    spawnP(PX+11,player.y+24,5,'#a78bfa');
+  }
+}
+
+function answer(idx){
+  if(!quiz||quiz.phase!=='options')return;
+  const correct=idx===quiz.math.correctIdx;
+  quizResult=correct?'correct':'wrong';
+  quizResultTimer=50;
+  if(correct&&quiz.obs){
+    quiz.obs.passable=true;quiz.obs.ghostTimer=120;
+    spawnP(quiz.obs.x+quiz.obs.w/2,GROUND-quiz.obs.h-10,12,'#34d399');
+  }else{
+    spawnP(PX+11,player.y+14,8,'#f87171');
+  }
+  quiz.phase='done';
+}
+
+function spawnP(x,y,n,color){
+  for(let i=0;i<n;i++)
+    particles.push({x,y,vx:(Math.random()-.5)*4,vy:Math.random()*-3.5-1,
+      life:30+Math.random()*15,maxLife:45,color,r:Math.random()*2.5+1});
+}
+
+function resetGame(){
+  if(score>hiScore)hiScore=score;
+  document.getElementById('hi').textContent=hiScore;
+  player={y:GROUND,vy:0,jumps:0,dead:false};
+  obstacles=[];particles=[];quiz=null;quizResult=null;
+  score=0;frame=0;spd=3.2;nextObsDist=420;quizCount=0;
+  state='play';
+  document.getElementById('sc').textContent=0;
+  nextQuiz();
+}
+
+function update(){
+  if(state!=='play')return;
+  frame++;
+  if(frame%420===0)spd=Math.min(6.5,spd+0.15);
+  if(frame%30===0&&!player.dead){score++;document.getElementById('sc').textContent=score;}
+
+  player.vy+=0.52;player.y+=player.vy;
+  if(player.y>=GROUND){player.y=GROUND;player.vy=0;player.jumps=0;}
+
+  stars.forEach(s=>{s.x-=s.spd;if(s.x<0){s.x=W;s.y=Math.random()*(GROUND-60);}});
+
+  nextObsDist-=spd;
+  if(nextObsDist<=0){
+    const ob=spawnObs();
+    if(quiz&&quiz.phase==='question'&&!quiz.obs){quiz.obs=ob;ob.linked=true;}
+    // 前3题间距680~780px（约4秒）；之后逐渐缩短到320~480px
+    const base=quizCount<=3?680:Math.max(320,680-quizCount*40);
+    nextObsDist=base+Math.random()*100;
+  }
+
+  obstacles.forEach(ob=>{
+    ob.x-=spd;
+    if(ob.ghostTimer>0)ob.ghostTimer--;
+
+    if(quiz&&quiz.obs===ob&&quiz.phase==='question'&&ob.x<=W-1){
+      const framesLeft=Math.max(20,(ob.x-(PX+22))/spd);
+      quiz.optionTotal=framesLeft;
+      quiz.optionTimer=framesLeft;
+      quiz.phase='options';
+    }
+
+    if(quiz&&quiz.obs===ob&&quiz.phase==='options'){
+      const dist=ob.x-(PX+22);
+      quiz.optionTimer=Math.max(0,dist/spd);
+      if(quiz.optionTimer<=0){
+        quizResult='wrong';quizResultTimer=50;
+        spawnP(ob.x+ob.w/2,GROUND-ob.h-10,6,'#f87171');
+        quiz.phase='done';
+      }
+    }
+
+    const collide=PX+22>ob.x+4&&PX<ob.x+ob.w-4&&player.y+28>GROUND-ob.h+4;
+    if(collide&&!ob.passable&&ob.ghostTimer===0&&!player.dead){
+      player.dead=true;state='dead';
+      spawnP(PX+11,player.y+14,18,'#f87171');
+    }
+
+    if(ob.x+ob.w<PX&&ob.linked){
+      ob.linked=false;
+      // 只有当这个障碍确实是当前 quiz 对应的，才触发下一题
+      if(quiz&&quiz.obs===ob){nextQuiz();}
+    }
+  });
+
+  obstacles=obstacles.filter(ob=>ob.x>-120);
+  particles.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=0.15;p.life--;});
+  particles=particles.filter(p=>p.life>0);
+  if(quizResultTimer>0)quizResultTimer--;else quizResult=null;
+}
+
+const bgCanvas=document.createElement('canvas');
+bgCanvas.width=W;bgCanvas.height=H;
+const bgCtx=bgCanvas.getContext('2d');
+bgCtx.fillStyle='#0f0c29';bgCtx.fillRect(0,0,W,H);
+bgCtx.fillStyle='rgba(80,40,160,0.2)';
+bgCtx.beginPath();bgCtx.ellipse(W*0.72,H*0.28,80,50,0.3,0,Math.PI*2);bgCtx.fill();
+
+function draw(){
+  ctx.drawImage(bgCanvas,0,0);
+
+  ctx.fillStyle='rgba(255,255,255,0.72)';
+  stars.forEach(s=>{ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,Math.PI*2);ctx.fill();});
+
+  ctx.strokeStyle='rgba(130,80,220,0.28)';ctx.lineWidth=1;ctx.setLineDash([4,8]);
+  ctx.beginPath();ctx.moveTo(0,GROUND+2);ctx.lineTo(W,GROUND+2);ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='rgba(80,40,160,0.1)';ctx.fillRect(0,GROUND+2,W,H-GROUND-2);
+
+  btnAreas=[];
+  obstacles.forEach(ob=>{
+    const oy=GROUND-ob.h;
+    if(ob.ghostTimer>0){
+      ctx.globalAlpha=0.3;ctx.fillStyle='#34d399';
+      ctx.beginPath();ctx.roundRect(ob.x,oy,ob.w,ob.h,4);ctx.fill();
+      ctx.globalAlpha=1;
+    }else{
+      ctx.fillStyle='#5b21b6';
+      ctx.beginPath();ctx.roundRect(ob.x,oy,ob.w,ob.h,4);ctx.fill();
+      ctx.strokeStyle='rgba(167,139,250,0.5)';ctx.lineWidth=1;
+      ctx.beginPath();ctx.roundRect(ob.x,oy,ob.w,ob.h,4);ctx.stroke();
+    }
+
+    if(quiz&&quiz.obs===ob&&quiz.phase==='options'){
+      const bw=72,bh=32,gap=8;
+      const totalW=bw*2+gap;
+      const by=oy-bh-10;
+      const prog=quiz.optionTotal>0?quiz.optionTimer/quiz.optionTotal:0;
+      const arcColor=prog>0.5?'#34d399':prog>0.25?'#fbbf24':'#f87171';
+
+      const barW=totalW;
+      const barX=Math.max(4,Math.min(W-totalW-4,ob.x+ob.w/2-totalW/2));
+      const barY=by-10,barH=5;
+      ctx.fillStyle='rgba(255,255,255,0.1)';
+      ctx.beginPath();ctx.roundRect(barX,barY,barW,barH,2);ctx.fill();
+      ctx.fillStyle=arcColor;
+      ctx.beginPath();ctx.roundRect(barX,barY,barW*prog,barH,2);ctx.fill();
+
+      quiz.math.opts.forEach((opt,i)=>{
+        const bx=Math.max(4,Math.min(W-bw-4,ob.x+ob.w/2-totalW/2+i*(bw+gap)));
+        ctx.fillStyle='#1e1358';
+        ctx.beginPath();ctx.roundRect(bx,by,bw,bh,6);ctx.fill();
+        ctx.strokeStyle='rgba(167,139,250,0.7)';ctx.lineWidth=1;
+        ctx.beginPath();ctx.roundRect(bx,by,bw,bh,6);ctx.stroke();
+        ctx.fillStyle='#e9d5ff';ctx.font=`500 16px ${FONT}`;ctx.textAlign='center';
+        ctx.fillText(opt,bx+bw/2,by+22);
+        btnAreas.push({x:bx,y:by,w:bw,h:bh,idx:i});
+      });
+    }
+  });
+
+  if(!player.dead){
+    const bob=Math.sin(frame*0.18)*1.2,px=PX,py=player.y;
+    ctx.globalAlpha=0.3;ctx.fillStyle='#a78bfa';
+    ctx.beginPath();ctx.ellipse(px+11,py+28+bob,9,4,0,0,Math.PI*2);ctx.fill();
+    ctx.globalAlpha=1;
+    ctx.fillStyle='#7c3aed';ctx.beginPath();ctx.roundRect(px,py+bob,22,28,6);ctx.fill();
+    ctx.fillStyle='#c4b5fd';ctx.beginPath();ctx.roundRect(px+4,py+4+bob,14,10,3);ctx.fill();
+    ctx.fillStyle='#fff';
+    ctx.beginPath();ctx.arc(px+7,py+9+bob,3,0,Math.PI*2);ctx.arc(px+15,py+9+bob,3,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#1e1b4b';
+    ctx.beginPath();ctx.arc(px+7.5,py+9+bob,1.5,0,Math.PI*2);ctx.arc(px+15.5,py+9+bob,1.5,0,Math.PI*2);ctx.fill();
+    const tn=Math.abs(player.vy)>2?3:1;
+    for(let i=0;i<tn;i++){
+      ctx.globalAlpha=0.1-i*0.025;ctx.fillStyle='#a78bfa';
+      ctx.beginPath();ctx.roundRect(px-(i+1)*6,py+i*2+bob,20,24,4);ctx.fill();
+    }
+    ctx.globalAlpha=1;
+  }
+
+  particles.forEach(p=>{
+    ctx.globalAlpha=p.life/p.maxLife*0.85;
+    ctx.fillStyle=p.color;
+    ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();
+  });
+  ctx.globalAlpha=1;
+
+  if(state==='play'&&quiz){
+    ctx.fillStyle='rgba(12,8,36,0.92)';
+    ctx.beginPath();ctx.roundRect(8,8,200,54,8);ctx.fill();
+    ctx.strokeStyle='rgba(167,139,250,0.6)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.roundRect(8,8,200,54,8);ctx.stroke();
+    ctx.fillStyle='#c4b5fd';ctx.font=`400 11px ${FONT}`;ctx.textAlign='left';
+    ctx.fillText('本关题目',18,23);
+    ctx.fillStyle='#fff';ctx.font=`500 20px ${FONT}`;ctx.textAlign='center';
+    ctx.fillText(quiz.math.q,108,50);
+  }
+
+  if(quizResult){
+    ctx.globalAlpha=Math.min(1,quizResultTimer/18);
+    ctx.fillStyle=quizResult==='correct'?'#34d399':'#f87171';
+    ctx.font=`500 26px ${FONT}`;ctx.textAlign='center';
+    ctx.fillText(quizResult==='correct'?'✓ 答对了！':'✗ 答错了！',W/2,H/2-20);
+    ctx.globalAlpha=1;
+  }
+
+  if(state==='start'||state==='dead'){
+    ctx.fillStyle='rgba(15,8,38,0.86)';ctx.fillRect(0,0,W,H);
+    if(state==='start'){
+      ctx.fillStyle='#c4b5fd';ctx.font=`500 24px ${FONT}`;ctx.textAlign='center';
+      ctx.fillText('聪明格 · 宇宙跑酷',W/2,H/2-30);
+      ctx.fillStyle='rgba(196,181,253,0.7)';ctx.font=`400 13px ${FONT}`;
+      ctx.fillText('跑步时先看题 · 障碍出现时选答案 · 答对跨越',W/2,H/2+4);
+    }else{
+      ctx.fillStyle='#f87171';ctx.font=`500 22px ${FONT}`;ctx.textAlign='center';
+      ctx.fillText('撞到障碍了！',W/2,H/2-34);
+      ctx.fillStyle='#e9d5ff';ctx.font=`400 17px ${FONT}`;
+      ctx.fillText(`得分：${score}`,W/2,H/2+2);
+      if(score>0&&score>=hiScore){
+        ctx.fillStyle='#fcd34d';ctx.font=`500 13px ${FONT}`;ctx.fillText('新纪录！',W/2,H/2+22);
+      }
+    }
+    ctx.fillStyle='#7c3aed';
+    ctx.beginPath();ctx.roundRect(W/2-60,H/2+(state==='start'?24:36),120,36,8);ctx.fill();
+    ctx.fillStyle='#fff';ctx.font=`500 15px ${FONT}`;
+    ctx.fillText(state==='start'?'开始游戏':'再来一次',W/2,H/2+(state==='start'?47:59));
+  }
+}
+
+function loop(){update();draw();requestAnimationFrame(loop);}
+
+function handleInput(cx,cy){
+  for(const b of btnAreas){
+    if(cx>=b.x&&cx<=b.x+b.w&&cy>=b.y&&cy<=b.y+b.h){answer(b.idx);return;}
+  }
+  jump();
+}
+
+canvas.addEventListener('click',e=>{
+  const r=canvas.getBoundingClientRect();
+  handleInput((e.clientX-r.left)*(W/r.width),(e.clientY-r.top)*(H/r.height));
+});
+canvas.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  const t=e.touches[0],r=canvas.getBoundingClientRect();
+  handleInput((t.clientX-r.left)*(W/r.width),(t.clientY-r.top)*(H/r.height));
+},{passive:false});
+
+loop();
+</script>
+</body>
+</html>
